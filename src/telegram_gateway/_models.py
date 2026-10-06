@@ -38,6 +38,8 @@ class TelegramMessage:
     images: tuple[bytes, ...] = ()
     translated_text: str | None = None
     translation_language: str | None = None
+    has_media: bool = False
+    reply_to_message_id: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -49,21 +51,26 @@ class TelegramMessage:
                 message_id=self.message_id,
             ),
         )
-        object.__setattr__(self, "images", tuple(self.images))
+        images = tuple(self.images)
+        object.__setattr__(self, "images", images)
+        if images:
+            object.__setattr__(self, "has_media", True)
 
     def to_dict(self) -> dict[str, object]:
-        """Return a dictionary representation of the message."""
+        """Return identity, channel, message, text, and media fields in order."""
         return {
             "id": self.id,
-            "message_id": self.message_id,
-            "timestamp": self.timestamp,
-            "channel_title": self.channel_title,
-            "channel_username": self.channel_username,
             "channel_id": self.channel_id,
+            "channel_username": self.channel_username,
+            "channel_title": self.channel_title,
+            "message_id": self.message_id,
+            "reply_to_message_id": self.reply_to_message_id,
+            "timestamp": self.timestamp,
             "text": self.text,
-            "images": self.images,
             "translated_text": self.translated_text,
             "translation_language": self.translation_language,
+            "has_media": self.has_media,
+            "images": self.images,
         }
 
     def __str__(self) -> str:

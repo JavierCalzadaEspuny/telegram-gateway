@@ -7,6 +7,8 @@ import logging
 from collections.abc import Sequence
 
 from telethon import TelegramClient, events
+from telethon.tl import functions
+from telethon.tl.custom.message import Message
 
 from ._models import TelegramMessage
 from ._processing import (
@@ -84,6 +86,8 @@ class TelegramListener:
             ),
         )
         self._started = False
+        self._stopping = False
+        self._processing_tasks: set[asyncio.Task[TelegramMessage | None]] = set()
         self.queue: asyncio.Queue[TelegramMessage | None] = asyncio.Queue(
             maxsize=normalized_queue_size
         )
@@ -101,23 +105,35 @@ class TelegramListener:
                     "TelegramListener requires a connected TelegramClient."
                 )
 
-            client.add_event_handler(
-                self._on_new_message,
-                events.NewMessage(chats=self._channels),
-            )
-            client.add_event_handler(
-                self._on_album,
-                events.Album(chats=self._channels),
-            )
+            new_messages = events.NewMessage(chats=self._channels)
+            albums = events.Album(chats=self._channels)
+            client.add_event_handler(self._on_new_message, new_messages)
+            client.add_event_handler(self._on_album, albums)
+            await new_messages.resolve(client)
+            await albums.resolve(client)
+            await client(functions.updates.GetStateRequest())
             logger.info(
                 "Listener started. Monitoring %d channel(s).",
                 len(self._channels),
             )
-            await client.run_until_disconnected()
+            await client.disconnected
+            # Telethon 1.45 exposes fatal update errors only through its owning
+            # run_until_disconnected wrapper, which also disconnects on cancel.
+            updates_error = getattr(client, "_updates_error", None)
+            if updates_error is not None:
+                raise updates_error
         finally:
+            self._stopping = True
             client.remove_event_handler(self._on_new_message)
             client.remove_event_handler(self._on_album)
-            self._signal_shutdown()
+            try:
+                pending = tuple(self._processing_tasks)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+            finally:
+                self._signal_shutdown()
 
     def _signal_shutdown(self) -> None:
         """End the queue without blocking, even when its buffer is full."""
@@ -141,28 +157,29 @@ class TelegramListener:
             )
 
     async def _on_new_message(self, event: events.NewMessage.Event) -> None:
-        try:
-            if event.message.grouped_id is not None:
-                return
+        if event.message.grouped_id is None:
+            await self._process_messages((event.message,))
 
-            message = await self._processor.process([event.message])
-            if message is None:
-                return
-            self._enqueue_message(message)
+    async def _on_album(self, event: events.Album.Event) -> None:
+        await self._process_messages(event.messages)
+
+    async def _process_messages(self, messages: Sequence[Message]) -> None:
+        """Own enrichment tasks without cancelling Telethon's other handlers."""
+        if self._stopping or not messages:
+            return
+        task = asyncio.create_task(self._processor.process(messages))
+        self._processing_tasks.add(task)
+        try:
+            message = await task
+            if message is not None and not self._stopping:
+                self._enqueue_message(message)
+        except asyncio.CancelledError:
+            if not self._stopping:
+                raise
         except Exception:
             logger.exception(
                 "Unhandled error processing message from chat_id=%s.",
-                event.message.chat_id,
+                messages[0].chat_id,
             )
-
-    async def _on_album(self, event: events.Album.Event) -> None:
-        try:
-            message = await self._processor.process(event.messages)
-            if message is None:
-                return
-            self._enqueue_message(message)
-        except Exception:
-            logger.exception(
-                "Unhandled error processing album from chat_id=%s.",
-                event.messages[0].chat_id if event.messages else "unknown",
-            )
+        finally:
+            self._processing_tasks.discard(task)

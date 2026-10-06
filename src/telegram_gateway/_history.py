@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from datetime import datetime, timezone
 
 from telethon import TelegramClient
@@ -126,15 +126,17 @@ class TelegramHistory:
             disable=not show_progress,
         ) as progress:
             for channel_index, channel in enumerate(self._channels):
-                entity = await self._client.get_entity(channel)
-                await self._fetch_channel(
+                entity = await self._client.get_input_entity(channel)
+                source_messages = self._iter_channel_messages(
                     entity,
                     start=start_seconds,
                     end=end_seconds,
                     end_utc=end_utc,
-                    messages=messages,
                     progress=progress,
                     progress_offset=channel_index * interval,
+                )
+                messages.extend(
+                    await self._processor.process_many(source_messages, peer=entity)
                 )
                 progress.update((channel_index + 1) * interval - progress.n)
 
@@ -147,20 +149,18 @@ class TelegramHistory:
         )
         return messages
 
-    async def _fetch_channel(
+    async def _iter_channel_messages(
         self,
         entity: object,
         *,
         start: int,
         end: int,
         end_utc: datetime,
-        messages: list[TelegramMessage],
         progress: tqdm,
         progress_offset: int,
-    ) -> None:
-        """Process one channel's historical stream in iterator order."""
+    ) -> AsyncIterator[Sequence[Message]]:
+        """Yield single messages and complete adjacent albums within the range."""
         album: list[Message] = []
-        album_id: int | None = None
 
         async for message in self._client.iter_messages(
             entity,
@@ -169,7 +169,6 @@ class TelegramHistory:
         ):
             timestamp = int(message.date.timestamp())
             if timestamp < start:
-                await self._flush(album, messages)
                 break
             if not start <= timestamp < end:
                 continue
@@ -178,35 +177,12 @@ class TelegramHistory:
             progress.update(completed - progress.n)
 
             grouped_id = message.grouped_id
+            if album and grouped_id != album[0].grouped_id:
+                yield album
+                album = []
             if grouped_id is None:
-                await self._flush(album, messages)
-                album_id = None
-                await self._process([message], messages)
-            elif album and grouped_id == album_id:
-                album.append(message)
+                yield (message,)
             else:
-                await self._flush(album, messages)
-                album = [message]
-                album_id = grouped_id
-
-        await self._flush(album, messages)
-
-    async def _flush(
-        self,
-        album: list[Message],
-        messages: list[TelegramMessage],
-    ) -> None:
-        """Process one completed adjacent album, if present."""
+                album.append(message)
         if album:
-            await self._process(album, messages)
-            album.clear()
-
-    async def _process(
-        self,
-        source_messages: Sequence[Message],
-        messages: list[TelegramMessage],
-    ) -> None:
-        """Append one processed logical message."""
-        message = await self._processor.process(source_messages)
-        if message is not None:
-            messages.append(message)
+            yield album

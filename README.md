@@ -8,9 +8,9 @@ TelegramGateway is a small async wrapper around Telethon. It does four things:
 - `TelegramHistory` returns a bounded historical range as a list.
 
 The two retrieval workflows produce immutable `TelegramMessage` objects. The
-library can group albums, download configured photos, translate configured
-channels, and generate a stable 26-character ID for each Telegram source
-message.
+library can group albums, report attached media and reply IDs, download
+configured photos, translate configured channels, and generate a stable
+26-character ID for each Telegram source message.
 
 The login command is the only interactive component. Runtime applications give
 `TelegramSession` a project root; it loads credentials, finds the phone-named
@@ -19,14 +19,19 @@ session, connects, verifies authorization, and disconnects its client.
 ## Install
 
 ```bash
-pip install git+https://github.com/JavierCalzadaEspuny/TelegramGateway.git
+pip install git+https://github.com/JavierCalzadaEspuny/telegram-gateway.git
 ```
 
 With uv:
 
 ```bash
-uv add git+https://github.com/JavierCalzadaEspuny/TelegramGateway.git
+uv add git+https://github.com/JavierCalzadaEspuny/telegram-gateway.git
 ```
+
+The distribution is named `telegram-gateway`; Python imports use
+`telegram_gateway`. The package includes the empty `py.typed` marker defined
+by [PEP 561](https://peps.python.org/pep-0561/), so type checkers can use its
+inline annotations. This marker has no runtime behavior.
 
 ## Login
 
@@ -137,23 +142,31 @@ Channels and processing options are fixed per coordinator. Create another
 `TelegramListener` or `TelegramHistory` with the same connected client when
 those options change.
 
+Channel usernames accept an optional leading `@`; image and translation
+selection ignores username case. Listener requires update reception to be
+enabled. Telethon request retries remain separate from Gateway's translation
+policy; see [doc/session.md](doc/session.md).
+
 ## Message
 
 | Field | Value |
 | --- | --- |
 | `id` | Stable 26-character ID derived from timestamp, channel ID, and message ID. |
-| `message_id` | Telegram message ID within the channel. |
-| `timestamp` | Unix seconds. |
-| `channel_title` | Channel display title. |
-| `channel_username` | Public username or `None`. |
 | `channel_id` | Telegram channel ID. |
+| `channel_username` | Public username or `None`. |
+| `channel_title` | Channel display title. |
+| `message_id` | Telegram message ID within the channel. |
+| `reply_to_message_id` | ID of the replied-to message, or `None`; its text is not fetched. |
+| `timestamp` | Unix seconds. |
 | `text` | Sanitized original text or `None`. |
-| `images` | Tuple of downloaded photo bytes. |
 | `translated_text` | Optional translated text. |
 | `translation_language` | Target language when translation succeeded. |
+| `has_media` | Whether the message has a photo, document, or paid-media attachment, including videos. |
+| `images` | Tuple of downloaded photo bytes. |
 
-`message.to_dict()` returns these fields without encoding image bytes or
-writing files.
+`message.to_dict()` returns fields in this order: identity, channel, message
+reference and time, original and translated text, then media. It does not
+encode image bytes or write files.
 
 ## Repository checks
 
@@ -161,3 +174,6 @@ The manual scripts under `smoke/` use `TelegramSession` with the project-local
 login. Set workflow options directly in `smoke/listener.py` and
 `smoke/history.py`; see [doc/testing.md](doc/testing.md). Architecture and
 ownership boundaries are in [doc/architecture.md](doc/architecture.md).
+
+The [technical review](doc/review.md) documents the current Telethon and Python
+choices, consumer integration findings, and improvements with tradeoffs.

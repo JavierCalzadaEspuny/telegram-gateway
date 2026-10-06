@@ -26,6 +26,33 @@ Keyword arguments after `project_root` are forwarded to Telethon's
 `TelegramClient`. TelegramGateway always supplies the session path, API ID, and
 API hash from the project-local login.
 
+## Request policy
+
+Telethon owns transport retries and reconnection. Gateway's translation retry
+count is an additional policy, not a replacement for Telethon's
+`request_retries`. For example, a caller can choose:
+
+```python
+session = TelegramSession(
+    receive_updates=False,  # History; Listener needs reception enabled.
+    raise_last_call_error=True,
+    flood_sleep_threshold=0,
+)
+```
+
+`raise_last_call_error=True` preserves the last RPC exception instead of
+Telethon's generic error after exhausted retries. `flood_sleep_threshold=0`
+exposes FloodWaits immediately: History's translator can wait and retry;
+Listener's translator emits the original text. These settings also apply to
+retrieval and other RPCs, whose errors propagate to the caller.
+
+Reducing `request_retries` can reduce hidden waits but weakens transport
+recovery; zero retries can prevent a migrated request from being resent. Choose
+this for the application, not by mutating a shared client in a coordinator.
+The documented per-call flood threshold is ineffective in pinned Telethon
+1.45.0, so use the client option. See the [review](review.md) for evidence and
+tradeoffs.
+
 ## Lifecycle
 
 `connect()` reads `.telegram/.env`, derives the session name from the digits in
