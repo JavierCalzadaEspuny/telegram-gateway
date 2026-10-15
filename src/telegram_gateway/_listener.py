@@ -13,7 +13,6 @@ from telethon.tl.custom.message import Message
 from ._models import TelegramMessage
 from ._processing import (
     MessageProcessor,
-    ProcessingPolicy,
     _normalize_target_language,
     _validate_channels,
     _validate_channel_subset,
@@ -78,12 +77,8 @@ class TelegramListener:
             translation_target_language=_normalize_target_language(
                 translation_target_language
             ),
-            policy=ProcessingPolicy(
-                translation_timeout=normalized_timeout,
-                translation_max_concurrency=normalized_concurrency,
-                translation_retries=0,
-                retry_flood_waits=False,
-            ),
+            translation_timeout=normalized_timeout,
+            translation_max_concurrency=normalized_concurrency,
         )
         self._started = False
         self._stopping = False

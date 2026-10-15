@@ -1,37 +1,21 @@
-"""Shared Telegram message normalization and enrichment."""
+"""Validation, normalization, and optional enrichment for live messages."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import math
-from collections.abc import AsyncIterable, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Sequence
 
 import emoji
 import ftfy
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError, RPCError, ServerError, TimedOutError
 from telethon.tl import functions, types
 from telethon.tl.custom.message import Message
 
 from ._models import TelegramMessage
 
 logger = logging.getLogger(__name__)
-
-# Follow Telegram Android's client-side translation batching thresholds.
-_TRANSLATION_BATCH_SIZE = 20
-_TRANSLATION_BATCH_UTF16_LIMIT = 25_000
-
-
-@dataclass(frozen=True, slots=True)
-class ProcessingPolicy:
-    """Controls bounded translation behavior for one message coordinator."""
-
-    translation_timeout: float
-    translation_max_concurrency: int
-    translation_retries: int
-    retry_flood_waits: bool
 
 
 def _sanitize(text: str | None) -> str | None:
@@ -175,20 +159,15 @@ class MessageProcessor:
         image_channels: frozenset[str],
         translation_channels: frozenset[str],
         translation_target_language: str,
-        policy: ProcessingPolicy,
+        translation_timeout: float,
+        translation_max_concurrency: int,
     ) -> None:
         self._client = client
-        self._image_channels = frozenset(
-            _channel_key(channel) for channel in image_channels
-        )
-        self._translation_channels = frozenset(
-            _channel_key(channel) for channel in translation_channels
-        )
+        self._image_channels = image_channels
+        self._translation_channels = translation_channels
         self._translation_target_language = translation_target_language
-        self._policy = policy
-        self._translation_semaphore = asyncio.Semaphore(
-            policy.translation_max_concurrency
-        )
+        self._translation_timeout = translation_timeout
+        self._translation_semaphore = asyncio.Semaphore(translation_max_concurrency)
         self._chat_meta: dict[int, tuple[str, str | None]] = {}
 
     async def process(
@@ -196,103 +175,6 @@ class MessageProcessor:
         messages: Sequence[Message],
     ) -> TelegramMessage | None:
         """Normalize a Telegram message or album with optional enrichment."""
-        result = await self._prepare_message(messages)
-        if result is None:
-            return None
-
-        translated_text, translation_language = await self._translate_if_configured(
-            result.text,
-            result.channel_title,
-            result.channel_username,
-        )
-        if translated_text is None:
-            return result
-        return replace(
-            result,
-            translated_text=translated_text,
-            translation_language=translation_language,
-        )
-
-    async def process_many(
-        self,
-        messages: AsyncIterable[Sequence[Message]],
-        *,
-        peer: object,
-    ) -> list[TelegramMessage]:
-        """Normalize logical messages and translate bounded batches of IDs."""
-        results: list[TelegramMessage] = []
-        pending: list[int] = []
-        symbols = 0
-        async for source_messages in messages:
-            result = await self._prepare_message(source_messages)
-            if result is None:
-                continue
-            results.append(result)
-            if (
-                result.text is None
-                or _channel_key(result.channel_username or "")
-                not in self._translation_channels
-            ):
-                continue
-
-            # ID-based translation uses Telegram's original text, including emoji.
-            source_text = min(source_messages, key=lambda m: m.id).raw_text or ""
-            source_symbols = len(source_text.encode("utf-16-le")) // 2
-            if pending and (
-                len(pending) >= _TRANSLATION_BATCH_SIZE
-                or symbols + source_symbols > _TRANSLATION_BATCH_UTF16_LIMIT
-            ):
-                await self._translate_batch(peer, results, pending)
-                pending.clear()
-                symbols = 0
-            pending.append(len(results) - 1)
-            symbols += source_symbols
-
-        if pending:
-            await self._translate_batch(peer, results, pending)
-        return results
-
-    async def _translate_batch(
-        self,
-        peer: object,
-        messages: list[TelegramMessage],
-        indexes: Sequence[int],
-    ) -> None:
-        """Apply a complete positional translation response, or keep originals."""
-        try:
-            response = await self._request_translation(
-                functions.messages.TranslateTextRequest(
-                    peer=peer,
-                    id=[messages[index].message_id for index in indexes],
-                    to_lang=self._translation_target_language,
-                )
-            )
-            if len(response.result) != len(indexes):
-                raise RuntimeError("Telegram returned an incomplete translation batch.")
-            translations = [_sanitize(item.text) for item in response.result]
-        except Exception as exc:
-            logger.warning(
-                "Translation failed for channel %r (%s messages): %s. "
-                "Emitting the original messages.",
-                messages[indexes[0]].channel_title,
-                len(indexes),
-                exc,
-            )
-            return
-
-        for index, translation in zip(indexes, translations):
-            if translation is not None:
-                messages[index] = replace(
-                    messages[index],
-                    translated_text=translation,
-                    translation_language=self._translation_target_language,
-                )
-
-    async def _prepare_message(
-        self,
-        messages: Sequence[Message],
-    ) -> TelegramMessage | None:
-        """Normalize message content and images without making translation calls."""
         if not messages:
             return None
 
@@ -328,6 +210,11 @@ class MessageProcessor:
         if text is None and not images and not has_media:
             return None
 
+        translated_text, translation_language = await self._translate_if_configured(
+            text,
+            channel_title,
+            channel_username,
+        )
         return TelegramMessage(
             message_id=base_message.id,
             timestamp=int(base_message.date.timestamp()),
@@ -336,6 +223,8 @@ class MessageProcessor:
             channel_id=channel_id,
             text=text,
             images=tuple(images),
+            translated_text=translated_text,
+            translation_language=translation_language,
             has_media=has_media,
             reply_to_message_id=reply_to_message_id,
         )
@@ -383,9 +272,17 @@ class MessageProcessor:
             return None, None
 
         try:
-            translated_text = _sanitize(
-                await self._translate_text(text, self._translation_target_language)
+            request = functions.messages.TranslateTextRequest(
+                text=[types.TextWithEntities(text=text, entities=[])],
+                to_lang=self._translation_target_language,
             )
+            result = await asyncio.wait_for(
+                self._send_translation_request(request),
+                timeout=self._translation_timeout,
+            )
+            if not result.result or not result.result[0].text:
+                raise RuntimeError("Telegram returned no translated text.")
+            translated_text = _sanitize(result.result[0].text)
         except Exception as exc:
             logger.warning(
                 "Translation failed for channel %r: %s. Emitting the original message.",
@@ -398,52 +295,10 @@ class MessageProcessor:
             return None, None
         return translated_text, self._translation_target_language
 
-    async def _translate_text(self, text: str, target_language: str) -> str:
-        """Translate text, retrying only as the configured policy permits."""
-        request = functions.messages.TranslateTextRequest(
-            text=[types.TextWithEntities(text=text, entities=[])],
-            to_lang=target_language,
-        )
-        result = await self._request_translation(request)
-        if not result.result or not result.result[0].text:
-            raise RuntimeError("Telegram returned no translated text.")
-        return result.result[0].text
-
-    async def _request_translation(
-        self,
-        request: functions.messages.TranslateTextRequest,
-    ) -> types.messages.TranslateResult:
-        """Send a translation request with the coordinator's retry policy."""
-        for attempt in range(self._policy.translation_retries + 1):
-            retry_delay = min(2 ** min(attempt, 5), 30)
-            try:
-                return await asyncio.wait_for(
-                    self._send_translation_request(request),
-                    timeout=self._policy.translation_timeout,
-                )
-            except FloodWaitError as exc:
-                if (
-                    not self._policy.retry_flood_waits
-                    or attempt == self._policy.translation_retries
-                ):
-                    raise
-                retry_delay = exc.seconds
-            except (asyncio.TimeoutError, ServerError, TimedOutError):
-                if attempt == self._policy.translation_retries:
-                    raise
-            except RPCError as exc:
-                if (
-                    exc.message != "TRANSLATE_REQ_QUOTA_EXCEEDED"
-                    or attempt == self._policy.translation_retries
-                ):
-                    raise
-            await asyncio.sleep(retry_delay)
-
-        raise RuntimeError("Translation retry loop ended unexpectedly.")
-
     async def _send_translation_request(
         self,
         request: functions.messages.TranslateTextRequest,
     ) -> types.messages.TranslateResult:
+        """Limit concurrent translation requests, including cancellation cleanup."""
         async with self._translation_semaphore:
             return await self._client(request)

@@ -14,7 +14,7 @@ The project root defaults to the current working directory. Pass it explicitly
 when the application can start elsewhere:
 
 ```python
-session = TelegramSession(project_root, receive_updates=False)
+session = TelegramSession(project_root, receive_updates=True)
 client = await session.connect()
 try:
     ...
@@ -28,13 +28,13 @@ API hash from the project-local login.
 
 ## Request policy
 
-Telethon owns transport retries and reconnection. Gateway's translation retry
-count is an additional policy, not a replacement for Telethon's
-`request_retries`. For example, a caller can choose:
+Telethon owns transport retries and reconnection. The listener adds no
+translation retries. Keep update reception enabled for the listener. For
+example, a caller can choose:
 
 ```python
 session = TelegramSession(
-    receive_updates=False,  # History; Listener needs reception enabled.
+    receive_updates=True,
     raise_last_call_error=True,
     flood_sleep_threshold=0,
 )
@@ -42,16 +42,15 @@ session = TelegramSession(
 
 `raise_last_call_error=True` preserves the last RPC exception instead of
 Telethon's generic error after exhausted retries. `flood_sleep_threshold=0`
-exposes FloodWaits immediately: History's translator can wait and retry;
-Listener's translator emits the original text. These settings also apply to
-retrieval and other RPCs, whose errors propagate to the caller.
+exposes FloodWaits immediately, so the listener's translator can emit the
+original text. These settings also apply to startup and other RPCs, whose
+errors propagate to the caller.
 
 Reducing `request_retries` can reduce hidden waits but weakens transport
 recovery; zero retries can prevent a migrated request from being resent. Choose
-this for the application, not by mutating a shared client in a coordinator.
-The documented per-call flood threshold is ineffective in pinned Telethon
-1.45.0, so use the client option. See the [review](review.md) for evidence and
-tradeoffs.
+these options on `TelegramSession` or the supplied client. The listener does
+not mutate client request settings. Its translation timeout includes waiting
+for a concurrency slot and Telethon's request handling.
 
 ## Lifecycle
 
@@ -72,6 +71,6 @@ login. Runtime session opening is deliberately non-interactive.
 ## Ownership
 
 The `TelegramSession` instance owns and disconnects the client it creates.
-`TelegramListener` and `TelegramHistory` borrow that connected client and never
-disconnect it. The application still decides when the runtime starts and ends,
+`TelegramListener` borrows that connected client and never disconnects it.
+The application still decides when the runtime starts and ends,
 which client options it needs, and whether or how to restart after failure.

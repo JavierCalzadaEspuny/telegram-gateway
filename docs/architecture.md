@@ -4,9 +4,9 @@
 telegram-login -> .telegram/.env + .telegram/sessions/<phone>.session
 
 TelegramSession -> connected, authorized TelegramClient
-    ├── TelegramListener -> asyncio.Queue[TelegramMessage | None]
-    └── TelegramHistory  -> list[TelegramMessage]
-                  \-> MessageProcessor
+TelegramListener borrows client
+    ├── NewMessage / Album -> MessageProcessor -> TelegramMessage | None
+    └── queue -> asyncio.Queue[TelegramMessage | None]
 ```
 
 The explicit login command owns preparation, interactive authorization, and
@@ -19,27 +19,32 @@ interactive login.
 ## Modules
 
 - `_listener.py`: Telethon events, queue backpressure, and shutdown.
-- `_history.py`: bounded sequential pagination, album grouping, sorting, and
-  optional progress.
-- `_processing.py`: shared validation, text cleanup, channel metadata, media
+- `_processing.py`: listener validation, text cleanup, channel metadata, media
   and reply metadata, images, and translation.
 - `_models.py`: immutable `TelegramMessage` and deterministic IDs.
 - `_session.py`: project-local paths, runtime credentials, and managed clients.
 - `login.py`: project-local credential preparation and interactive login.
-- `__init__.py`: the public session, retrieval, and message types.
+- `__init__.py`: the public listener, session, and message types.
 
-Both workflows use the same processing rules but different latency policies.
-Listener translates individual live messages, is concurrency-limited, and
-never adds Gateway retries. History translates bounded batches per channel
-and may retry known transient translation failures. Images and translation fail open;
-retrieval errors do not.
+The listener validates its fixed configuration once, then processes each new
+message or native album through one normalization and enrichment path. The
+processor builds a single immutable message after optional image download and
+translation. Translation uses a semaphore and a timeout that includes waiting
+for that semaphore; it adds no retries. Images and translation fail open.
+Connection, authorization, and startup channel-resolution errors propagate;
+individual event-processing failures are logged without stopping the listener.
 
-Telethon owns pagination, native album assembly, entity caching, transport
+Telethon owns native album assembly, entity caching, transport
 retries, reconnection, and media decoding. Listener waits on its public
 disconnection future without taking ownership of the client. A single read of
 Telethon 1.45's private `_updates_error` preserves fatal update-error
 propagation, which its public future does not expose. Review that compatibility
 point when upgrading Telethon.
+
+The listener owns its event handlers, processing tasks, and output queue. It
+never disconnects the supplied client. A full bounded queue drops the incoming
+message. Shutdown cancels pending enrichment and always enqueues `None`,
+discarding one buffered message if necessary to make room.
 
 Login deliberately remains a standalone command. `TelegramSession` reuses its
 project-local layout but never prompts, mutates credentials, or authorizes a

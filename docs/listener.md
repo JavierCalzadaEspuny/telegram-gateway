@@ -75,7 +75,7 @@ disabled or fails; video bytes are not downloaded.
 
 Text is Unicode-repaired and emoji-stripped. Translation runs only for
 `translation_channels`, is limited by `translation_timeout` and
-`translation_max_concurrency`, and has no Gateway retries in the live path.
+`translation_max_concurrency`, and has no Gateway retries.
 The timeout includes waiting for translation concurrency and Telethon's own
 request handling, but does not bound image downloads. Telethon's retry and
 FloodWait options remain caller-owned; see [session.md](session.md).

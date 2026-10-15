@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telegram-gateway"
-version = "1.4.0"
-description = "Managed Telegram sessions, live queues, and bounded history."
+version = "2.0.0"
+description = "Live Telegram channel messages with project-local session management."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -15,7 +15,6 @@ dependencies = [
     "emoji>=2.1.0",
     "python-ulid>=3.1.0",
     "python-dotenv>=1.0.0",
-    "tqdm>=4.67.1",
 ]
 
 [project.scripts]

@@ -1,16 +1,16 @@
 # TelegramGateway
 
-TelegramGateway is a small async wrapper around Telethon. It does four things:
+TelegramGateway streams new Telegram channel messages into an `asyncio.Queue`
+through `TelegramListener`. It is a small async wrapper around Telethon:
 
 - `telegram-login` prepares and authorizes a project-local Telegram session.
 - `TelegramSession` opens and owns the authorized runtime client.
 - `TelegramListener` sends new channel messages to an `asyncio.Queue`.
-- `TelegramHistory` returns a bounded historical range as a list.
 
-The two retrieval workflows produce immutable `TelegramMessage` objects. The
-library can group albums, report attached media and reply IDs, download
-configured photos, translate configured channels, and generate a stable
-26-character ID for each Telegram source message.
+The listener produces immutable `TelegramMessage` objects. It can group
+albums, report attached media and reply IDs, download configured photos,
+translate configured channels, and generate a stable 26-character ID for each
+Telegram source message.
 
 The login command is the only interactive component. Runtime applications give
 `TelegramSession` a project root; it loads credentials, finds the phone-named
@@ -64,7 +64,7 @@ Sessions use the digits from `TELEGRAM_PHONE` as their name, for example:
 
 All paths are relative to the current working directory. The generated
 `.telegram/.gitignore` ignores every credential and session file while keeping
-itself trackable. See [doc/login.md](doc/login.md).
+itself trackable. See [docs/login.md](docs/login.md).
 
 ## Runtime session
 
@@ -77,15 +77,15 @@ from pathlib import Path
 from telegram_gateway import TelegramSession
 
 async with TelegramSession(Path.cwd()) as client:
-    # Pass the connected client to TelegramListener or TelegramHistory.
+    # Pass the connected client to TelegramListener.
     ...
 ```
 
 The project root defaults to `Path.cwd()`. Additional keyword arguments are
-forwarded to Telethon, for example `TelegramSession(receive_updates=False)`.
+forwarded to Telethon, for example `TelegramSession(receive_updates=True)`.
 Missing configuration, missing session files, and unauthorized sessions raise
 `TelegramSessionError` without starting an interactive login. See
-[doc/session.md](doc/session.md).
+[docs/session.md](docs/session.md).
 
 ## Listener
 
@@ -104,48 +104,34 @@ async with TelegramSession() as client:
     )
 
     async def consume() -> None:
-        while (message := await listener.queue.get()) is not None:
-            print(message)
+        while True:
+            message = await listener.queue.get()
+            try:
+                if message is None:
+                    return
+                print(message)
+            finally:
+                listener.queue.task_done()
 
     consumer = asyncio.create_task(consume())
-    await listener.start()
-    await consumer
+    try:
+        await listener.start()
+    finally:
+        await consumer
 ```
 
 `start()` runs until the client disconnects. A full bounded queue drops the
 incoming message rather than blocking Telethon. `None` marks shutdown. See
-[doc/listener.md](doc/listener.md).
+[docs/listener.md](docs/listener.md).
 
-## History
-
-```python
-from telegram_gateway import TelegramHistory, TelegramSession
-
-async with TelegramSession() as client:
-    history = TelegramHistory(
-        client,
-        ["AjaNews", "almayadeen"],
-        image_channels=["AjaNews"],
-        translation_channels=["almayadeen"],
-    )
-    messages = await history.fetch(
-        start=1_767_225_600,
-        end=1_767_312_000,
-        show_progress=True,
-    )
-```
-
-The result contains `[start, end)` in Unix seconds and is sorted by timestamp,
-channel ID, and Telegram message ID. See [doc/history.md](doc/history.md).
-
-Channels and processing options are fixed per coordinator. Create another
-`TelegramListener` or `TelegramHistory` with the same connected client when
-those options change.
+Channels and processing options are fixed per listener. Create another
+`TelegramListener` with the same connected client when those options change.
 
 Channel usernames accept an optional leading `@`; image and translation
 selection ignores username case. Listener requires update reception to be
-enabled. Telethon request retries remain separate from Gateway's translation
-policy; see [doc/session.md](doc/session.md).
+enabled. Translation has a timeout and bounded concurrency, and failures
+preserve the original message. The listener adds no translation retries;
+Telethon request options remain caller-owned. See [docs/session.md](docs/session.md).
 
 ## Message
 
@@ -170,10 +156,7 @@ encode image bytes or write files.
 
 ## Repository checks
 
-The manual scripts under `smoke/` use `TelegramSession` with the project-local
-login. Set workflow options directly in `smoke/listener.py` and
-`smoke/history.py`; see [doc/testing.md](doc/testing.md). Architecture and
-ownership boundaries are in [doc/architecture.md](doc/architecture.md).
-
-The [technical review](doc/review.md) documents the current Telethon and Python
-choices, consumer integration findings, and improvements with tradeoffs.
+The manual script `smoke/listener.py` uses `TelegramSession` with the
+project-local login. Set channels and enrichment options directly in its
+constants; see [docs/testing.md](docs/testing.md). Architecture and ownership
+boundaries are in [docs/architecture.md](docs/architecture.md).

@@ -2,17 +2,15 @@
 
 ## Scope
 
-TelegramGateway is a small Telethon wrapper with four entry points:
+TelegramGateway is a small Telethon wrapper for live channel messages:
 
 - `telegram-login` prepares and authorizes a project-local session.
 - `TelegramSession` loads that session and owns one connected runtime client.
 - `TelegramListener` sends configured live channels to
   `asyncio.Queue[TelegramMessage | None]`.
-- `TelegramHistory` returns configured channels from a bounded half-open
-  Unix-second range as `list[TelegramMessage]`.
 
 Keep project-local login, images, albums, optional translation, deterministic
-IDs, listener backpressure, historical retries, and optional history progress.
+IDs, and listener backpressure.
 Do not add message persistence, JSON output, databases, OCR, workers,
 notifications, or application policy.
 
@@ -25,18 +23,17 @@ only after successful authorization and never stores Telegram codes.
 `TelegramSession` owns runtime configuration loading, session-path derivation,
 client creation, connection, authorization checks, and disconnection. It never
 starts interactive authorization. Callers own when the lifecycle begins and
-ends, client options, storage, and restart policy. Listener and history must
-not disconnect a supplied client. Do not add global paths, account managers,
+ends, client options, storage, and restart policy. The listener must not
+disconnect a supplied client. Do not add global paths, account managers,
 profiles, automatic login, or a phone CLI option.
 
-Fixed channels and processing options are validated when a coordinator is
+Fixed channels and processing options are validated when a listener is
 created. Do not add mutable setters. Use `ValueError` for invalid arguments and
 `RuntimeError` for invalid runtime state.
 
-Images and translation are optional enrichment and fail open. Retrieval,
+Images and translation are optional enrichment and fail open. Connection,
 authorization, and channel-resolution errors propagate. Listener translation
-has bounded concurrency and no retry. History is sequential and retries only
-known transient translation failures and configured FloodWaits.
+has bounded concurrency and no retry.
 
 ## Layout
 
@@ -44,19 +41,16 @@ known transient translation failures and configured FloodWaits.
 src/telegram_gateway/
     __init__.py
     _listener.py
-    _history.py
     _processing.py
     _models.py
     _session.py
     login.py
 smoke/
     listener.py
-    history.py
-doc/
+docs/
     architecture.md
     session.md
     listener.md
-    history.md
     login.md
     testing.md
 ```
@@ -72,7 +66,7 @@ Do not add permanent tests. Use exact disposable paths under `/private/tmp`,
 then remove them. Do not run real Telegram calls during routine review.
 
 ```bash
-.venv/bin/python -m compileall -q src smoke/listener.py smoke/history.py
+.venv/bin/python -m compileall -q src smoke/listener.py
 uv lock --check
 uv build --wheel
 git diff --check
