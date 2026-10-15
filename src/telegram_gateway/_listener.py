@@ -4,23 +4,46 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import Sequence
 
 from telethon import TelegramClient, events
 from telethon.tl import functions
 from telethon.tl.custom.message import Message
 
-from ._models import TelegramMessage
-from ._processing import (
-    MessageProcessor,
-    _normalize_target_language,
-    _validate_channels,
-    _validate_channel_subset,
-    _validate_non_negative_integer,
-    _validate_positive_number,
-)
+from ._models import TelegramChannel, TelegramMessage
+from ._processing import MessageProcessor
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_channels(channels: Sequence[TelegramChannel]) -> tuple[TelegramChannel, ...]:
+    """Snapshot fixed channel options and reject duplicate usernames."""
+    if isinstance(channels, (str, bytes)):
+        raise ValueError("channels must be a sequence of TelegramChannel objects.")
+    try:
+        validated = tuple(channels)
+    except TypeError as exc:
+        raise ValueError("channels must be a sequence of TelegramChannel objects.") from exc
+    if not validated:
+        raise ValueError("channels cannot be empty.")
+    if any(not isinstance(channel, TelegramChannel) for channel in validated):
+        raise ValueError("channels must contain only TelegramChannel objects.")
+    keys = [channel.username.casefold() for channel in validated]
+    if len(set(keys)) != len(keys):
+        raise ValueError("channels cannot contain duplicate usernames.")
+    return validated
+
+
+def _validate_timeout(value: object, parameter: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{parameter} must be finite and greater than zero.")
+    try:
+        valid = math.isfinite(value) and value > 0
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise ValueError(f"{parameter} must be finite and greater than zero.")
 
 
 class TelegramListener:
@@ -29,63 +52,45 @@ class TelegramListener:
     def __init__(
         self,
         client: TelegramClient,
-        channels: Sequence[str],
+        channels: Sequence[TelegramChannel],
         *,
-        image_channels: Sequence[str] = (),
-        translation_channels: Sequence[str] = (),
-        translation_target_language: str = "en",
         translation_timeout: float = 3.0,
         translation_max_concurrency: int = 2,
+        media_timeout: float = 30.0,
+        media_max_concurrency: int = 2,
+        media_max_bytes: int = 20 * 1024 * 1024,
         queue_maxsize: int = 0,
     ) -> None:
-        monitored_channels = _validate_channels(
-            channels,
-            parameter="channels",
-            allow_empty=False,
-        )
-        downloaded_image_channels = _validate_channel_subset(
-            image_channels,
-            monitored_channels,
-            parameter="image_channels",
-        )
-        translated_channels = _validate_channel_subset(
-            translation_channels,
-            monitored_channels,
-            parameter="translation_channels",
-        )
-        normalized_timeout = _validate_positive_number(
-            translation_timeout,
-            parameter="translation_timeout",
-        )
-        normalized_concurrency = _validate_non_negative_integer(
-            translation_max_concurrency,
-            parameter="translation_max_concurrency",
-        )
-        if normalized_concurrency == 0:
-            raise ValueError("translation_max_concurrency must be greater than zero.")
-        normalized_queue_size = _validate_non_negative_integer(
-            queue_maxsize,
-            parameter="queue_maxsize",
-        )
+        channels = _validate_channels(channels)
+        for name, value in (
+            ("translation_timeout", translation_timeout),
+            ("media_timeout", media_timeout),
+        ):
+            _validate_timeout(value, name)
+        for name, value, minimum in (
+            ("translation_max_concurrency", translation_max_concurrency, 1),
+            ("media_max_concurrency", media_max_concurrency, 1),
+            ("media_max_bytes", media_max_bytes, 1),
+            ("queue_maxsize", queue_maxsize, 0),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}.")
 
         self._client = client
-        self._channels = monitored_channels
+        self._channel_usernames = tuple(channel.username for channel in channels)
         self._processor = MessageProcessor(
             client=client,
-            image_channels=downloaded_image_channels,
-            translation_channels=translated_channels,
-            translation_target_language=_normalize_target_language(
-                translation_target_language
-            ),
-            translation_timeout=normalized_timeout,
-            translation_max_concurrency=normalized_concurrency,
+            channels=channels,
+            translation_timeout=translation_timeout,
+            translation_max_concurrency=translation_max_concurrency,
+            media_timeout=media_timeout,
+            media_max_concurrency=media_max_concurrency,
+            media_max_bytes=media_max_bytes,
         )
         self._started = False
         self._stopping = False
         self._processing_tasks: set[asyncio.Task[TelegramMessage | None]] = set()
-        self.queue: asyncio.Queue[TelegramMessage | None] = asyncio.Queue(
-            maxsize=normalized_queue_size
-        )
+        self.queue: asyncio.Queue[TelegramMessage | None] = asyncio.Queue(maxsize=queue_maxsize)
 
     async def start(self) -> None:
         """Start the listener and block until the supplied client disconnects."""
@@ -100,16 +105,17 @@ class TelegramListener:
                     "TelegramListener requires a connected TelegramClient."
                 )
 
-            new_messages = events.NewMessage(chats=self._channels)
-            albums = events.Album(chats=self._channels)
+            new_messages = events.NewMessage(chats=self._channel_usernames)
+            albums = events.Album(chats=self._channel_usernames)
             client.add_event_handler(self._on_new_message, new_messages)
             client.add_event_handler(self._on_album, albums)
+            await self._processor.resolve_channels()
             await new_messages.resolve(client)
             await albums.resolve(client)
             await client(functions.updates.GetStateRequest())
             logger.info(
                 "Listener started. Monitoring %d channel(s).",
-                len(self._channels),
+                len(self._channel_usernames),
             )
             await client.disconnected
             # Telethon 1.45 exposes fatal update errors only through its owning

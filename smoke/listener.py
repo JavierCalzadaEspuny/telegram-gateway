@@ -8,18 +8,26 @@ import logging
 from telethon.errors import AuthKeyError, UnauthorizedError
 
 from telegram_gateway import (
+    TelegramChannel,
     TelegramListener,
     TelegramMessage,
     TelegramSession,
     TelegramSessionError,
 )
 
-CHANNELS: list[str] = ["testosint01"]
-IMAGE_CHANNELS: list[str] = ["testosint01"]
-TRANSLATION_CHANNELS: list[str] = ["testosint01"]
-TRANSLATION_TARGET_LANGUAGE = "en"
+CHANNELS = (
+    TelegramChannel(
+        "testosint01",
+        translate=True,
+        download_photos=True,
+        download_videos=False,
+    ),
+)
 TRANSLATION_TIMEOUT = 3.0
 TRANSLATION_MAX_CONCURRENCY = 2
+MEDIA_TIMEOUT = 30.0
+MEDIA_MAX_CONCURRENCY = 2
+MEDIA_MAX_BYTES = 20 * 1024 * 1024
 QUEUE_MAXSIZE = 1000
 
 logging.basicConfig(
@@ -49,11 +57,11 @@ async def main() -> None:
             listener = TelegramListener(
                 client=client,
                 channels=CHANNELS,
-                image_channels=IMAGE_CHANNELS,
-                translation_channels=TRANSLATION_CHANNELS,
-                translation_target_language=TRANSLATION_TARGET_LANGUAGE,
                 translation_timeout=TRANSLATION_TIMEOUT,
                 translation_max_concurrency=TRANSLATION_MAX_CONCURRENCY,
+                media_timeout=MEDIA_TIMEOUT,
+                media_max_concurrency=MEDIA_MAX_CONCURRENCY,
+                media_max_bytes=MEDIA_MAX_BYTES,
                 queue_maxsize=QUEUE_MAXSIZE,
             )
             consumer = asyncio.create_task(consume(listener.queue))

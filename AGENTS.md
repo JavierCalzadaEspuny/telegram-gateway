@@ -9,10 +9,13 @@ TelegramGateway is a small Telethon wrapper for live channel messages:
 - `TelegramListener` sends configured live channels to
   `asyncio.Queue[TelegramMessage | None]`.
 
-Keep project-local login, images, albums, optional translation, deterministic
-IDs, and listener backpressure.
+Keep project-local login, attachment metadata, optional photo/video downloads,
+albums, optional translation, deterministic IDs, and listener backpressure.
 Do not add message persistence, JSON output, databases, OCR, workers,
 notifications, or application policy.
+
+Maintain only the current public API. Do not add legacy aliases, deprecated
+arguments, migration layers, or backward-compatibility paths.
 
 ## Ownership
 
@@ -27,13 +30,27 @@ ends, client options, storage, and restart policy. The listener must not
 disconnect a supplied client. Do not add global paths, account managers,
 profiles, automatic login, or a phone CLI option.
 
-Fixed channels and processing options are validated when a listener is
+Channel enrichment options belong to immutable `TelegramChannel` objects.
+The `translate` boolean enables English translation; there is no language option.
+Use `download_photos` and `download_videos` for optional attachment downloads.
+Fixed channels and processing limits are validated when a listener is
 created. Do not add mutable setters. Use `ValueError` for invalid arguments and
 `RuntimeError` for invalid runtime state.
 
-Images and translation are optional enrichment and fail open. Connection,
-authorization, and channel-resolution errors propagate. Listener translation
-has bounded concurrency and no retry.
+Output models are plain typed, frozen dataclasses built by the processor.
+Keep `media` as the single attachment collection and `has_media` as a computed
+property. Do not add output field validators, duplicate image/video views,
+serialization methods, or custom JSON representations. Telegram owns username
+format acceptance; Gateway validates local configuration only.
+
+Media downloads and translation are optional enrichment; external requests and
+responses fail open. Keep mapping and request preparation outside their catches
+so programming errors reach the listener's event-error handler. Always
+preserve attachment records and original captions independently of downloads.
+Keep original and translated text unchanged; cleanup belongs to callers.
+Connection, authorization, and channel-resolution errors propagate. Listener translation
+has bounded concurrency and no retry. Photo/video downloads have bounded
+concurrency, a timeout, and a configurable per-attachment byte limit.
 
 ## Layout
 

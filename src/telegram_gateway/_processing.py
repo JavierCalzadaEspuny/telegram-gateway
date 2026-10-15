@@ -1,236 +1,171 @@
-"""Validation, normalization, and optional enrichment for live messages."""
+"""Package original Telegram messages and apply optional bounded enrichment."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import math
 from collections.abc import Sequence
+from dataclasses import replace
 
-import emoji
-import ftfy
-from telethon import TelegramClient
+from telethon import TelegramClient, utils
 from telethon.tl import functions, types
 from telethon.tl.custom.message import Message
 
-from ._models import TelegramMessage
+from ._models import MediaKind, TelegramChannel, TelegramMedia, TelegramMessage
 
 logger = logging.getLogger(__name__)
 
 
-def _sanitize(text: str | None) -> str | None:
-    """Remove emoji and repair text, returning ``None`` for empty input."""
-    if text is None:
-        return None
-    sanitized = emoji.replace_emoji(ftfy.fix_text(text), replace="").strip()
-    return sanitized or None
-
-
-def _channel_key(username: str) -> str:
-    """Compare Telegram usernames without case or an optional leading @."""
-    return username.strip().removeprefix("@").casefold()
-
-
-def _validate_channels(
-    channels: Sequence[str],
-    *,
-    parameter: str,
-    allow_empty: bool,
-) -> tuple[str, ...]:
-    """Return validated channel usernames."""
-    if isinstance(channels, str):
-        raise ValueError(f"{parameter} must be a sequence of usernames.")
-
-    try:
-        validated = tuple(channels)
-    except TypeError as exc:
-        raise ValueError(f"{parameter} must be a sequence of usernames.") from exc
-    if any(
-        not isinstance(channel, str) or not channel.strip() for channel in validated
+def _describe_media(message: Message) -> tuple[TelegramMedia, ...]:
+    """Describe actual attachments, without downloading or including link previews."""
+    native = message.media
+    if native is None or isinstance(
+        native, (types.MessageMediaEmpty, types.MessageMediaWebPage)
     ):
-        raise ValueError(f"{parameter} must contain only usernames.")
-    if not allow_empty and not validated:
-        raise ValueError(f"{parameter} cannot be empty.")
-    return tuple(channel.strip() for channel in validated)
+        return ()
 
-
-def _validate_channel_subset(
-    channels: Sequence[str],
-    monitored_channels: Sequence[str],
-    *,
-    parameter: str,
-) -> frozenset[str]:
-    """Return channels after ensuring they are monitored."""
-    validated = frozenset(
-        _channel_key(channel)
-        for channel in _validate_channels(
-            channels, parameter=parameter, allow_empty=True
+    kind: MediaKind
+    if isinstance(native, types.MessageMediaPhoto):
+        kind = "photo"
+    elif isinstance(native, types.MessageMediaDocument):
+        attributes = getattr(native.document, "attributes", ())
+        is_video = any(isinstance(item, types.DocumentAttributeVideo) for item in attributes)
+        is_animation = any(
+            isinstance(item, types.DocumentAttributeAnimated) for item in attributes
         )
+        kind = "video" if is_video and not is_animation else "document"
+    else:
+        kind = "other"
+
+    item = TelegramMedia(
+        message_id=message.id,
+        kind=kind,
+        caption=message.raw_text or None,
     )
-    unknown = validated.difference(
-        _channel_key(channel) for channel in monitored_channels
+    if isinstance(native, types.MessageMediaPhoto) and isinstance(native.video, types.Document):
+        return item, replace(item, kind="video")
+    return (item,)
+
+
+def _largest_photo_size(photo: types.Photo) -> types.TypePhotoSize | None:
+    return max(
+        (
+            size
+            for size in photo.sizes
+            if isinstance(
+                size,
+                (
+                    types.PhotoSize,
+                    types.PhotoCachedSize,
+                    types.PhotoSizeProgressive,
+                    types.PhotoStrippedSize,
+                ),
+            )
+        ),
+        key=lambda size: getattr(size, "w", 0) * getattr(size, "h", 0),
+        default=None,
     )
-    if unknown:
-        raise ValueError(
-            f"{parameter} must be monitored channels; unknown: "
-            f"{', '.join(sorted(unknown))}."
-        )
-    return validated
 
 
-def _normalize_target_language(target_language: str) -> str:
-    """Return a normalized two-letter ISO 639-1 language code."""
-    if not isinstance(target_language, str):
-        raise ValueError("Target language must be a string.")
-    normalized = target_language.strip().lower()
-    if len(normalized) != 2 or not normalized.isascii() or not normalized.isalpha():
-        raise ValueError(
-            "Target language must be a two-letter ISO 639-1 code such as 'en' or 'es'."
-        )
-    return normalized
-
-
-def _validate_positive_number(value: object, *, parameter: str) -> float:
-    """Return a finite positive number."""
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value <= 0
-    ):
-        raise ValueError(f"{parameter} must be greater than zero.")
-    return float(value)
-
-
-def _validate_non_negative_integer(value: object, *, parameter: str) -> int:
-    """Return a non-negative integer."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{parameter} must be a non-negative integer.")
-    return value
-
-
-async def _download_image_bytes(
-    client: TelegramClient, message: Message
-) -> bytes | None:
-    """Safely attempt to download one message photo as bytes."""
-    try:
-        photo = getattr(message, "photo", None)
-        if not isinstance(photo, types.Photo):
-            return None
-
-        size = max(
-            (
-                size
-                for size in photo.sizes
-                if isinstance(
-                    size,
-                    (
-                        types.PhotoSize,
-                        types.PhotoCachedSize,
-                        types.PhotoSizeProgressive,
-                        types.PhotoStrippedSize,
-                    ),
-                )
-            ),
-            key=lambda size: getattr(size, "w", 0) * getattr(size, "h", 0),
-            default=None,
-        )
-        if size is None:
-            return None
-        # A message preview can prefer a document; a photo can include MP4 sizes.
-        payload = await client.download_media(photo, file=bytes, thumb=size.type)
-        return payload if isinstance(payload, bytes) else None
-    except Exception as exc:
-        logger.warning(
-            "Could not download image for chat_id=%s: %s",
-            message.chat_id,
-            exc,
-        )
-        return None
+def _photo_size_bytes(size: types.TypePhotoSize) -> int:
+    if isinstance(size, types.PhotoSize):
+        return size.size
+    if isinstance(size, (types.PhotoCachedSize, types.PhotoStrippedSize)):
+        return len(size.bytes)
+    if isinstance(size, types.PhotoSizeProgressive):
+        return max(size.sizes, default=0)
+    return 0
 
 
 class MessageProcessor:
-    """Build normalized messages from one Telegram message or an album."""
+    """Map a live message or album to values, preserving every attachment."""
 
     def __init__(
         self,
         *,
         client: TelegramClient,
-        image_channels: frozenset[str],
-        translation_channels: frozenset[str],
-        translation_target_language: str,
+        channels: Sequence[TelegramChannel],
         translation_timeout: float,
         translation_max_concurrency: int,
+        media_timeout: float,
+        media_max_concurrency: int,
+        media_max_bytes: int,
     ) -> None:
         self._client = client
-        self._image_channels = image_channels
-        self._translation_channels = translation_channels
-        self._translation_target_language = translation_target_language
+        self._channel_options = tuple(channels)
+        self._channels_by_id: dict[int, TelegramChannel] | None = None
+        self._channel_lock = asyncio.Lock()
         self._translation_timeout = translation_timeout
         self._translation_semaphore = asyncio.Semaphore(translation_max_concurrency)
+        self._media_timeout = media_timeout
+        self._media_semaphore = asyncio.Semaphore(media_max_concurrency)
+        self._media_max_bytes = media_max_bytes
         self._chat_meta: dict[int, tuple[str, str | None]] = {}
 
-    async def process(
-        self,
-        messages: Sequence[Message],
-    ) -> TelegramMessage | None:
-        """Normalize a Telegram message or album with optional enrichment."""
+    async def resolve_channels(self) -> dict[int, TelegramChannel]:
+        """Bind fixed options to peer IDs once, including secondary usernames."""
+        if self._channels_by_id is not None:
+            return self._channels_by_id
+        async with self._channel_lock:
+            if self._channels_by_id is None:
+                resolved: dict[int, TelegramChannel] = {}
+                for channel in self._channel_options:
+                    peer = await self._client.get_input_entity(channel.username)
+                    channel_id = utils.get_peer_id(peer)
+                    if channel_id in resolved:
+                        raise ValueError(
+                            "Each Telegram channel must have one configuration; "
+                            f"{channel.username!r} resolves to an already configured channel."
+                        )
+                    resolved[channel_id] = channel
+                self._channels_by_id = resolved
+        return self._channels_by_id
+
+    async def process(self, messages: Sequence[Message]) -> TelegramMessage | None:
         if not messages:
             return None
 
-        ordered_messages = sorted(messages, key=lambda message: message.id)
-        base_message = ordered_messages[0]
-        channel_id, channel_title, channel_username = await self._resolve_chat_meta(
-            base_message
-        )
-        text = _sanitize(base_message.text)
-        has_media = any(
-            isinstance(
-                getattr(message, "media", None),
-                (
-                    types.MessageMediaPhoto,
-                    types.MessageMediaDocument,
-                    types.MessageMediaPaidMedia,
-                ),
-            )
-            for message in ordered_messages
-        )
-        reply_to_message_id = next(
-            (
-                message.reply_to_msg_id
-                for message in ordered_messages
-                if getattr(message, "reply_to_msg_id", None) is not None
-            ),
-            None,
-        )
-        images = await self._download_configured_images(
-            ordered_messages,
-            channel_username,
-        )
-        if text is None and not images and not has_media:
+        ordered = sorted(messages, key=lambda message: message.id)
+        base = ordered[0]
+        channels_by_id = await self.resolve_channels()
+        channel_id, channel_title, channel_username = await self._resolve_chat_meta(base)
+        channel = channels_by_id[channel_id]
+        caption_source = next((message for message in ordered if message.raw_text), None)
+        raw_text = caption_source.raw_text if caption_source is not None else None
+
+        media: list[TelegramMedia] = []
+        for source in ordered:
+            for item in _describe_media(source):
+                should_download = (
+                    (item.kind == "photo" and channel.download_photos)
+                    or (item.kind == "video" and channel.download_videos)
+                )
+                if should_download:
+                    data = await self._download_media(source, item)
+                    if data is not None:
+                        item = replace(item, data=data)
+                media.append(item)
+
+        if raw_text is None and not media:
             return None
 
-        translated_text, translation_language = await self._translate_if_configured(
-            text,
-            channel_title,
-            channel_username,
-        )
+        translated_text = await self._translate(caption_source, channel, channel_title)
         return TelegramMessage(
-            message_id=base_message.id,
-            timestamp=int(base_message.date.timestamp()),
+            message_id=base.id,
+            timestamp=int(base.date.timestamp()),
             channel_title=channel_title,
             channel_username=channel_username,
             channel_id=channel_id,
-            text=text,
-            images=tuple(images),
+            raw_text=raw_text,
+            media=tuple(media),
             translated_text=translated_text,
-            translation_language=translation_language,
-            has_media=has_media,
-            reply_to_message_id=reply_to_message_id,
+            reply_to_message_id=next(
+                (message.reply_to_msg_id for message in ordered if message.reply_to_msg_id is not None),
+                None,
+            ),
         )
 
     async def _resolve_chat_meta(self, message: Message) -> tuple[int, str, str | None]:
-        """Resolve and cache the chat title and Telegram username by ID."""
         chat_id = message.chat_id
         if chat_id not in self._chat_meta:
             chat = await message.get_chat()
@@ -238,67 +173,97 @@ class MessageProcessor:
                 getattr(chat, "title", str(chat_id)),
                 getattr(chat, "username", None),
             )
+        title, username = self._chat_meta[chat_id]
+        return chat_id, title, username
 
-        channel_title, channel_username = self._chat_meta[chat_id]
-        return chat_id, channel_title, channel_username
+    async def _download_media(self, source: Message, item: TelegramMedia) -> bytes | None:
+        """Prepare the attachment and fail open only around the download."""
+        native = source.media
+        thumb = None
+        if item.kind == "photo":
+            asset = native.photo
+            if not isinstance(asset, types.Photo):
+                return None
+            size = _largest_photo_size(asset)
+            if size is None:
+                return None
+            expected_size = _photo_size_bytes(size)
+            thumb = size.type
+        else:
+            asset = (
+                native.video
+                if isinstance(native, types.MessageMediaPhoto)
+                else native.document
+            )
+            if not isinstance(asset, types.Document):
+                return None
+            expected_size = asset.size
 
-    async def _download_configured_images(
-        self,
-        messages: Sequence[Message],
-        channel_username: str | None,
-    ) -> list[bytes]:
-        """Download photos in message-ID order when the channel opts in."""
-        if _channel_key(channel_username or "") not in self._image_channels:
-            return []
-
-        images: list[bytes] = []
-        for message in messages:
-            image_bytes = await _download_image_bytes(self._client, message)
-            if image_bytes is not None:
-                images.append(image_bytes)
-        return images
-
-    async def _translate_if_configured(
-        self,
-        text: str | None,
-        channel_title: str,
-        channel_username: str | None,
-    ) -> tuple[str | None, str | None]:
-        """Translate optional enrichment without replacing the original text."""
-        if (
-            text is None
-            or _channel_key(channel_username or "") not in self._translation_channels
-        ):
-            return None, None
+        if expected_size <= 0 or expected_size > self._media_max_bytes:
+            logger.warning(
+                "Skipping %s download for chat_id=%s message_id=%s: "
+                "size %s is unknown or exceeds media_max_bytes=%s.",
+                item.kind, source.chat_id, source.id,
+                expected_size, self._media_max_bytes,
+            )
+            return None
 
         try:
-            request = functions.messages.TranslateTextRequest(
-                text=[types.TextWithEntities(text=text, entities=[])],
-                to_lang=self._translation_target_language,
+            return await asyncio.wait_for(
+                self._download_bytes(asset, thumb=thumb), timeout=self._media_timeout
             )
+        except Exception as exc:
+            logger.warning(
+                "Could not download %s for chat_id=%s message_id=%s: %s",
+                item.kind, source.chat_id, source.id, exc,
+            )
+            return None
+
+    async def _download_bytes(
+        self, asset: types.Photo | types.Document, *, thumb: str | None
+    ) -> bytes:
+        async with self._media_semaphore:
+            payload = await self._client.download_media(asset, file=bytes, thumb=thumb)
+        if not isinstance(payload, bytes):
+            raise RuntimeError("Telegram returned no media bytes.")
+        if len(payload) > self._media_max_bytes:
+            raise RuntimeError("Downloaded content exceeds media_max_bytes.")
+        return payload
+
+    async def _translate(
+        self,
+        source: Message | None,
+        channel: TelegramChannel,
+        channel_title: str,
+    ) -> str | None:
+        if source is None or not channel.translate:
+            return None
+
+        request = functions.messages.TranslateTextRequest(
+            text=[types.TextWithEntities(
+                text=source.raw_text,
+                entities=list(source.entities or ()),
+            )],
+            to_lang="en",
+        )
+
+        try:
             result = await asyncio.wait_for(
                 self._send_translation_request(request),
                 timeout=self._translation_timeout,
             )
             if not result.result or not result.result[0].text:
                 raise RuntimeError("Telegram returned no translated text.")
-            translated_text = _sanitize(result.result[0].text)
+            return result.result[0].text
         except Exception as exc:
             logger.warning(
                 "Translation failed for channel %r: %s. Emitting the original message.",
-                channel_title,
-                exc,
+                channel_title, exc,
             )
-            translated_text = None
-
-        if translated_text is None:
-            return None, None
-        return translated_text, self._translation_target_language
+            return None
 
     async def _send_translation_request(
-        self,
-        request: functions.messages.TranslateTextRequest,
+        self, request: functions.messages.TranslateTextRequest
     ) -> types.messages.TranslateResult:
-        """Limit concurrent translation requests, including cancellation cleanup."""
         async with self._translation_semaphore:
             return await self._client(request)

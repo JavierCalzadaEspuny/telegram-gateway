@@ -4,15 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telegram-gateway"
-version = "2.0.0"
+version = "3.0.0"
 description = "Live Telegram channel messages with project-local session management."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 dependencies = [
     "telethon==1.45.0",
-    "ftfy>=6.0",
-    "emoji>=2.1.0",
     "python-ulid>=3.1.0",
     "python-dotenv>=1.0.0",
 ]

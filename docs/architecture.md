@@ -4,50 +4,65 @@
 telegram-login -> .telegram/.env + .telegram/sessions/<phone>.session
 
 TelegramSession -> connected, authorized TelegramClient
+TelegramChannel -> fixed options for one monitored channel
 TelegramListener borrows client
     ├── NewMessage / Album -> MessageProcessor -> TelegramMessage | None
+    │                              └── TelegramMedia metadata + optional bytes
     └── queue -> asyncio.Queue[TelegramMessage | None]
 ```
 
-The explicit login command owns preparation, interactive authorization, and
-the temporary client it creates. `TelegramSession` owns runtime configuration
-loading, client creation, connection, authorization checks, and disconnection.
-Applications decide when to connect and disconnect, which Telethon options to
-use, and how to store messages or restart. No runtime component invokes
-interactive login.
+Login owns preparation, interactive authorization, and its temporary client.
+`TelegramSession` owns runtime configuration loading, client creation,
+connection, authorization checks, and disconnection. Applications choose when
+to connect, disconnect, store messages, or restart. Runtime never invokes login.
 
 ## Modules
 
-- `_listener.py`: Telethon events, queue backpressure, and shutdown.
-- `_processing.py`: listener validation, text cleanup, channel metadata, media
-  and reply metadata, images, and translation.
-- `_models.py`: immutable `TelegramMessage` and deterministic IDs.
+- `_listener.py`: fixed configuration validation, event handlers, queue pressure,
+  task ownership, and shutdown.
+- `_processing.py`: fixed rules bound to resolved peer IDs, message/album mapping,
+  cached channel metadata, attachment classification, optional downloads,
+  and optional English translation.
+- `_models.py`: immutable `TelegramChannel`, `TelegramMessage`, `TelegramMedia`,
+  one attachment-presence property, and deterministic IDs.
 - `_session.py`: project-local paths, runtime credentials, and managed clients.
 - `login.py`: project-local credential preparation and interactive login.
-- `__init__.py`: the public listener, session, and message types.
+- `__init__.py`: public listener, session, channel, and packet types.
 
-The listener validates its fixed configuration once, then processes each new
-message or native album through one normalization and enrichment path. The
-processor builds a single immutable message after optional image download and
-translation. Translation uses a semaphore and a timeout that includes waiting
-for that semaphore; it adds no retries. Images and translation fail open.
-Connection, authorization, and startup channel-resolution errors propagate;
-individual event-processing failures are logged without stopping the listener.
+## Packet construction
 
-Telethon owns native album assembly, entity caching, transport
-retries, reconnection, and media decoding. Listener waits on its public
-disconnection future without taking ownership of the client. A single read of
-Telethon 1.45's private `_updates_error` preserves fatal update-error
-propagation, which its public future does not expose. Review that compatibility
-point when upgrading Telethon.
+The processor packages source values without text cleanup or application policy.
+Every attachment keeps its original message ID and caption even if its bytes
+are absent. Albums use the smallest source ID for identity and select the first
+nonempty caption for the convenient original-text and translation fields.
+Caption provenance remains in each media record.
 
-The listener owns its event handlers, processing tasks, and output queue. It
-never disconnects the supplied client. A full bounded queue drops the incoming
-message. Shutdown cancels pending enrichment and always enqueues `None`,
-discarding one buffered message if necessary to make room.
+The output has one media tuple; its `has_media` property returns `bool(media)`.
+Output dataclasses have no field validators or serialization methods; the
+processor constructs their values. Configuration is validated at construction,
+while Telegram owns username acceptance. Each channel's boolean `translate`
+enables English translation. Capturing attachment
+metadata needs no download. Optional downloads and translation each
+have a semaphore and timeout; downloads also have a per-attachment byte limit.
+External enrichment requests and their responses fail open without Gateway
+retries. Mapping and request-preparation errors reach the listener's error
+handler rather than being treated as enrichment failures. Startup connection,
+authorization, and channel-resolution errors propagate. Event-processing errors
+are logged without stopping the listener.
 
-Login deliberately remains a standalone command. `TelegramSession` reuses its
-project-local layout but never prompts, mutates credentials, or authorizes a
-missing session. There are no global paths, account profiles, automatic login,
-or application restart policy. The package has no message persistence, JSON
-writer, database, OCR, worker, notification, or application-policy layer.
+## Ownership
+
+Telethon owns native album assembly, entity caching, transport retries,
+reconnection, and media decoding. Listener waits on the public disconnection
+future without owning the client. A read of Telethon 1.45's private
+`_updates_error` preserves fatal update errors that its public future does not
+expose. Review this use of a private attribute when upgrading Telethon.
+
+Listener owns its handlers, processing tasks, and output queue. A full bounded
+queue drops an incoming completed packet; shutdown cancels owned enrichment
+and enqueues `None`, discarding one buffered packet if necessary.
+
+The package has no history retrieval, message persistence, JSON writer,
+database, OCR, workers, notifications, or application-policy layer. Login and
+runtime sessions remain project-local with no account profiles, global paths,
+automatic authorization, or application restart policy.
