@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 from telethon.errors import AuthKeyError, UnauthorizedError
 
@@ -14,6 +15,8 @@ from telegram_gateway import (
     TelegramSession,
     TelegramSessionError,
 )
+
+SESSION_DIRECTORY = Path.home() / ".local/share/telegram-osint/auth/telegram"
 
 CHANNELS = (
     TelegramChannel(
@@ -43,6 +46,7 @@ async def consume(queue: asyncio.Queue[TelegramMessage | None]) -> None:
         try:
             if message is None:
                 break
+            print()
             print(message)
         finally:
             queue.task_done()
@@ -53,7 +57,7 @@ async def main() -> None:
         raise RuntimeError("Set CHANNELS at the top of smoke/listener.py")
 
     try:
-        async with TelegramSession() as client:
+        async with TelegramSession(SESSION_DIRECTORY) as client:
             listener = TelegramListener(
                 client=client,
                 channels=CHANNELS,

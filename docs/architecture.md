@@ -1,7 +1,7 @@
 # Architecture
 
 ```text
-telegram-login -> .telegram/.env + .telegram/sessions/<phone>.session
+telegram-login --directory PATH -> credentials.json + account.session
 
 TelegramSession -> connected, authorized TelegramClient
 TelegramChannel -> fixed options for one monitored channel
@@ -24,9 +24,9 @@ to connect, disconnect, store messages, or restart. Runtime never invokes login.
   cached channel metadata, attachment classification, optional downloads,
   and optional English translation.
 - `_models.py`: immutable `TelegramChannel`, `TelegramMessage`, `TelegramMedia`,
-  one attachment-presence property, and deterministic IDs.
-- `_session.py`: project-local paths, runtime credentials, and managed clients.
-- `login.py`: project-local credential preparation and interactive login.
+  derived text/media properties, and deterministic IDs.
+- `_session.py`: explicit directory, validated runtime credentials, and managed clients.
+- `login.py`: interactive authorization and private credential persistence.
 - `__init__.py`: public listener, session, channel, and packet types.
 
 ## Packet construction
@@ -37,7 +37,8 @@ are absent. Albums use the smallest source ID for identity and select the first
 nonempty caption for the convenient original-text and translation fields.
 Caption provenance remains in each media record.
 
-The output has one media tuple; its `has_media` property returns `bool(media)`.
+The output has one media tuple; `has_media` returns `bool(media)`.
+`searchable_text` selects translation, then original text, without changing either.
 Output dataclasses have no field validators or serialization methods; the
 processor constructs their values. Configuration is validated at construction,
 while Telegram owns username acceptance. Each channel's boolean `translate`
@@ -64,5 +65,5 @@ and enqueues `None`, discarding one buffered packet if necessary.
 
 The package has no history retrieval, message persistence, JSON writer,
 database, OCR, workers, notifications, or application-policy layer. Login and
-runtime sessions remain project-local with no account profiles, global paths,
+runtime sessions use an explicit caller-owned directory with no account profiles, global paths,
 automatic authorization, or application restart policy.

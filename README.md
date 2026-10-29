@@ -3,18 +3,19 @@
 TelegramGateway streams new Telegram channel messages into an `asyncio.Queue`
 through `TelegramListener`. It is a small async wrapper around Telethon:
 
-- `telegram-login` prepares and authorizes a project-local Telegram session.
+- `telegram-login` authorizes a saved Telegram session.
 - `TelegramSession` opens and owns the authorized runtime client.
 - `TelegramListener` sends new channel messages to an `asyncio.Queue`.
 
 The listener packages each new message or album into an immutable
-`TelegramMessage`. Original text, attachment kinds, captions, and source IDs
+`TelegramMessage`. `searchable_text` prefers translation without changing either text field.
+Original text, attachment kinds, captions, and source IDs
 remain available without downloading files. Photo/video downloads and
 translation are explicit per-channel options. Stable 26-character IDs
 identify the original Telegram source.
 
 The login command is the only interactive component. Runtime applications give
-`TelegramSession` a project root; it loads credentials, finds the phone-named
+`TelegramSession` an explicit directory; it loads credentials and the saved
 session, connects, verifies authorization, and disconnects its client.
 
 ## Install
@@ -36,66 +37,42 @@ inline annotations. This marker has no runtime behavior.
 
 ## Login
 
-Run the command from the repository that should own the session:
-
-```bash
-uv run telegram-login --prepare
-uv run telegram-login
+```sh
+telegram-login --directory ~/.local/share/telegram-osint/auth/telegram
 ```
 
-`--prepare` creates an idempotent local layout without asking for credentials:
-
-```text
-.telegram/
-├── .env
-├── .gitignore
-└── sessions/
-```
-
-The normal command also prepares missing paths. It reads existing values from
-`.telegram/.env`, prompts only for missing credentials, and writes those new
-values only after Telegram authorizes the session. Telegram codes are never
-stored. A 2FA password is requested only when Telegram requires it.
-
-Sessions use the digits from `TELEGRAM_PHONE` as their name, for example:
-
-```text
-.telegram/sessions/34600123456.session
-```
-
-All paths are relative to the current working directory. The generated
-`.telegram/.gitignore` ignores every credential and session file while keeping
-itself trackable. See [docs/login.md](docs/login.md).
+The command creates the directory, asks for missing API credentials and authorizes
+Telegram. It saves `credentials.json` and Telethon's `account.session` with private
+permissions. Phone input, login codes and 2FA passwords are not persisted by the
+login command. Existing authorized sessions are reused without prompts.
+See [Login](docs/login.md).
 
 ## Runtime session
 
-Use `TelegramSession` instead of reading credentials or constructing a
-`TelegramClient` in each application:
-
 ```python
 from pathlib import Path
-
 from telegram_gateway import TelegramSession
 
-async with TelegramSession(Path.cwd()) as client:
-    # Pass the connected client to TelegramListener.
+session_directory = Path.home() / ".local/share/telegram-osint/auth/telegram"
+async with TelegramSession(session_directory) as client:
     ...
 ```
 
-The project root defaults to `Path.cwd()`. Additional keyword arguments are
-forwarded to Telethon, for example `TelegramSession(receive_updates=True)`.
-Missing configuration, missing session files, and unauthorized sessions raise
-`TelegramSessionError` without starting an interactive login. See
-[docs/session.md](docs/session.md).
+The caller chooses the directory. Additional keyword arguments go to Telethon.
+Missing or revoked sessions raise `TelegramSessionError`; runtime never prompts.
+See [Runtime session](docs/session.md).
 
 ## Listener
 
 ```python
 import asyncio
+from pathlib import Path
 
 from telegram_gateway import TelegramChannel, TelegramListener, TelegramSession
 
-async with TelegramSession() as client:
+session_directory = Path.home() / ".local/share/telegram-osint/auth/telegram"
+
+async with TelegramSession(session_directory) as client:
     listener = TelegramListener(
         client,
         [
@@ -194,6 +171,6 @@ and retains media bytes. The default representation omits byte payloads.
 ## Repository checks
 
 The manual script `smoke/listener.py` uses `TelegramSession` with the
-project-local login. Set channels and enrichment options directly in its
+persistent login. Set channels and enrichment options directly in its
 constants; see [docs/testing.md](docs/testing.md). Architecture and ownership
 boundaries are in [docs/architecture.md](docs/architecture.md).

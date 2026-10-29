@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 from collections.abc import Sequence
+from typing import Annotated
+
+from pydantic import ConfigDict, Field, validate_call
 
 from telethon import TelegramClient, events
 from telethon.tl import functions
@@ -17,64 +19,25 @@ from ._processing import MessageProcessor
 logger = logging.getLogger(__name__)
 
 
-def _validate_channels(channels: Sequence[TelegramChannel]) -> tuple[TelegramChannel, ...]:
-    """Snapshot fixed channel options and reject duplicate usernames."""
-    if isinstance(channels, (str, bytes)):
-        raise ValueError("channels must be a sequence of TelegramChannel objects.")
-    try:
-        validated = tuple(channels)
-    except TypeError as exc:
-        raise ValueError("channels must be a sequence of TelegramChannel objects.") from exc
-    if not validated:
-        raise ValueError("channels cannot be empty.")
-    if any(not isinstance(channel, TelegramChannel) for channel in validated):
-        raise ValueError("channels must contain only TelegramChannel objects.")
-    keys = [channel.username.casefold() for channel in validated]
-    if len(set(keys)) != len(keys):
-        raise ValueError("channels cannot contain duplicate usernames.")
-    return validated
-
-
-def _validate_timeout(value: object, parameter: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{parameter} must be finite and greater than zero.")
-    try:
-        valid = math.isfinite(value) and value > 0
-    except OverflowError:
-        valid = False
-    if not valid:
-        raise ValueError(f"{parameter} must be finite and greater than zero.")
-
-
 class TelegramListener:
     """Stream configured channels into an ``asyncio.Queue``."""
 
+    @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def __init__(
         self,
         client: TelegramClient,
-        channels: Sequence[TelegramChannel],
+        channels: Annotated[Sequence[TelegramChannel], Field(min_length=1)],
         *,
-        translation_timeout: float = 3.0,
-        translation_max_concurrency: int = 2,
-        media_timeout: float = 30.0,
-        media_max_concurrency: int = 2,
-        media_max_bytes: int = 20 * 1024 * 1024,
-        queue_maxsize: int = 0,
+        translation_timeout: Annotated[float, Field(gt=0, allow_inf_nan=False, strict=True)] = 3.0,
+        translation_max_concurrency: Annotated[int, Field(gt=0, strict=True)] = 2,
+        media_timeout: Annotated[float, Field(gt=0, allow_inf_nan=False, strict=True)] = 30.0,
+        media_max_concurrency: Annotated[int, Field(gt=0, strict=True)] = 2,
+        media_max_bytes: Annotated[int, Field(gt=0, strict=True)] = 20 * 1024 * 1024,
+        queue_maxsize: Annotated[int, Field(ge=0, strict=True)] = 0,
     ) -> None:
-        channels = _validate_channels(channels)
-        for name, value in (
-            ("translation_timeout", translation_timeout),
-            ("media_timeout", media_timeout),
-        ):
-            _validate_timeout(value, name)
-        for name, value, minimum in (
-            ("translation_max_concurrency", translation_max_concurrency, 1),
-            ("media_max_concurrency", media_max_concurrency, 1),
-            ("media_max_bytes", media_max_bytes, 1),
-            ("queue_maxsize", queue_maxsize, 0),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-                raise ValueError(f"{name} must be an integer >= {minimum}.")
+        channels = tuple(channels)
+        if len({channel.username.casefold() for channel in channels}) != len(channels):
+            raise ValueError("channels cannot contain duplicate usernames")
 
         self._client = client
         self._channel_usernames = tuple(channel.username for channel in channels)

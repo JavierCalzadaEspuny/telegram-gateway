@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Annotated, Literal
+
+from pydantic import ConfigDict, Field, field_validator
+from pydantic.dataclasses import dataclass as validated_dataclass
 
 import ulid
 
@@ -19,29 +22,22 @@ def _message_ulid(timestamp: int, channel_id: int, message_id: int) -> str:
     return str(ulid.ULID.from_bytes(timestamp_bytes + entropy))
 
 
-@dataclass(frozen=True, slots=True)
+@validated_dataclass(frozen=True, slots=True, config=ConfigDict(extra="forbid"))
 class TelegramChannel:
     """A monitored username and its explicit, optional enrichment settings."""
 
-    username: str
-    translate: bool = False
-    download_photos: bool = False
-    download_videos: bool = False
+    username: Annotated[str, Field(strict=True)]
+    translate: Annotated[bool, Field(strict=True)] = False
+    download_photos: Annotated[bool, Field(strict=True)] = False
+    download_videos: Annotated[bool, Field(strict=True)] = False
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.username, str):
-            raise ValueError("username must be a Telegram username.")
-        username = self.username.strip().removeprefix("@")
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, value: str) -> str:
+        username = value.strip().removeprefix("@")
         if not username:
-            raise ValueError("username must be a Telegram username, optionally with @.")
-        object.__setattr__(self, "username", username)
-
-        if not isinstance(self.translate, bool):
-            raise ValueError("translate must be a boolean.")
-        if not isinstance(self.download_photos, bool):
-            raise ValueError("download_photos must be a boolean.")
-        if not isinstance(self.download_videos, bool):
-            raise ValueError("download_videos must be a boolean.")
+            raise ValueError("username must be a Telegram username, optionally with @")
+        return username
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,3 +80,8 @@ class TelegramMessage:
     def has_media(self) -> bool:
         """Whether any attachment is present, independently of downloaded bytes."""
         return bool(self.media)
+
+    @property
+    def searchable_text(self) -> str:
+        """Return translated text, otherwise original text."""
+        return self.translated_text or self.raw_text or ""

@@ -4,12 +4,12 @@
 
 TelegramGateway is a small Telethon wrapper for live channel messages:
 
-- `telegram-login` prepares and authorizes a project-local session.
+- `telegram-login` authorizes a saved session in an explicit directory.
 - `TelegramSession` loads that session and owns one connected runtime client.
 - `TelegramListener` sends configured live channels to
   `asyncio.Queue[TelegramMessage | None]`.
 
-Keep project-local login, attachment metadata, optional photo/video downloads,
+Keep explicit persistent login, attachment metadata, optional photo/video downloads,
 albums, optional translation, deterministic IDs, and listener backpressure.
 Do not add message persistence, JSON output, databases, OCR, workers,
 notifications, or application policy.
@@ -19,16 +19,13 @@ arguments, migration layers, or backward-compatibility paths.
 
 ## Ownership
 
-The login command owns `.telegram/.env`, phone-named sessions, interactive
-authorization, and its temporary client. It writes newly entered credentials
-only after successful authorization and never stores Telegram codes.
+The login command owns interactive authorization, credentials.json and account.session
+inside a caller-supplied directory. Save API credentials only after authorization;
+never persist phone input, login codes or 2FA passwords in credential metadata.
 
-`TelegramSession` owns runtime configuration loading, session-path derivation,
-client creation, connection, authorization checks, and disconnection. It never
-starts interactive authorization. Callers own when the lifecycle begins and
-ends, client options, storage, and restart policy. The listener must not
-disconnect a supplied client. Do not add global paths, account managers,
-profiles, automatic login, or a phone CLI option.
+`TelegramSession` loads the same explicit directory and owns its client lifecycle.
+Runtime never starts interactive login. The listener only borrows its client.
+Do not add global application paths, account managers, profiles or compatibility layers.
 
 Channel enrichment options belong to immutable `TelegramChannel` objects.
 The `translate` boolean enables English translation; there is no language option.
@@ -37,7 +34,9 @@ Fixed channels and processing limits are validated when a listener is
 created. Do not add mutable setters. Use `ValueError` for invalid arguments and
 `RuntimeError` for invalid runtime state.
 
-Output models are plain typed, frozen dataclasses built by the processor.
+TelegramMedia and TelegramMessage are plain frozen dataclasses built by the processor.
+TelegramChannel uses a frozen Pydantic dataclass; listener inputs use validate_call.
+TelegramMessage.searchable_text prefers translation without storing a duplicate field.
 Keep `media` as the single attachment collection and `has_media` as a computed
 property. Do not add output field validators, duplicate image/video views,
 serialization methods, or custom JSON representations. Telegram owns username

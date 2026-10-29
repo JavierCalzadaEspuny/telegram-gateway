@@ -1,4 +1,4 @@
-"""Live Telegram channel messages with project-local session management."""
+"""Live Telegram channel messages with explicit session storage."""
 
 from __future__ import annotations
 

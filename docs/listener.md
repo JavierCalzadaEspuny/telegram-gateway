@@ -4,9 +4,11 @@
 `asyncio.Queue[TelegramMessage | None]`.
 
 ```python
+from pathlib import Path
+
 from telegram_gateway import TelegramChannel, TelegramListener, TelegramSession
 
-async with TelegramSession() as client:
+async with TelegramSession(Path("/data/auth/telegram")) as client:
     listener = TelegramListener(
         client,
         channels=[
@@ -151,9 +153,9 @@ and FloodWait handling remain caller choices; see [session.md](session.md).
 
 The processor returns typed, frozen dataclasses and creates the media tuple
 directly. Output objects do not repeat field validation or define serialization
-methods. The only computed values are the deterministic ID and the `has_media`
-property. Consumers choose whether to use original or translated text, clean
-it, and serialize or store fields. The standard `dataclasses.asdict(message)`
+methods. Computed values include the deterministic ID, `has_media` and `searchable_text`.
+`searchable_text` prefers translation without changing either field. Consumers
+own text cleanup, serialization and storage. The standard `dataclasses.asdict(message)`
 is available when needed: it retains media bytes and includes no computed
 properties. The default object representation omits byte payloads.
 
